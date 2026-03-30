@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+_tmp_subs/
+downloaded_audio/
+generated_transcript_combined_texts/
+generated_transcript_metadata_tables/
+build/
+dist/
+*.exe
+*.pyc

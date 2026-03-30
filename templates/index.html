@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YouTube Transcriber</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f13;
+      color: #e2e2e8;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px 80px;
+    }
+
+    .logo { font-size: 2rem; margin-bottom: 6px; }
+    h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -.5px; }
+    .subtitle { color: #888; font-size: .9rem; margin-top: 4px; margin-bottom: 40px; }
+
+    .card {
+      background: #1a1a24;
+      border: 1px solid #2a2a38;
+      border-radius: 16px;
+      padding: 32px;
+      width: 100%;
+      max-width: 680px;
+      box-shadow: 0 8px 40px rgba(0,0,0,.4);
+    }
+
+    .input-row { display: flex; gap: 10px; }
+    .input-row input {
+      flex: 1;
+      padding: 13px 16px;
+      border-radius: 10px;
+      border: 1px solid #2e2e40;
+      background: #11111a;
+      color: #e2e2e8;
+      font-size: .95rem;
+      outline: none;
+      transition: border .2s;
+    }
+    .input-row input:focus { border-color: #6c63ff; }
+    .input-row input::placeholder { color: #555; }
+
+    .btn-row { display: flex; gap: 8px; }
+
+    button#go {
+      padding: 13px 24px;
+      border-radius: 10px;
+      border: none;
+      background: #6c63ff;
+      color: #fff;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s, opacity .2s;
+      white-space: nowrap;
+    }
+    button#go:hover:not(:disabled) { background: #574fd6; }
+    button#go:disabled { opacity: .5; cursor: not-allowed; }
+
+    button#cancelBtn {
+      padding: 13px 20px;
+      border-radius: 10px;
+      border: 1px solid #5a2a2a;
+      background: #2c1a1a;
+      color: #ff7070;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s;
+      white-space: nowrap;
+      display: none;
+    }
+    button#cancelBtn:hover { background: #3a1a1a; }
+
+    /* cookies option */
+    .options-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .options-row label { font-size: .85rem; color: #888; }
+    .options-row select {
+      background: #11111a;
+      border: 1px solid #2e2e40;
+      color: #e2e2e8;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: .85rem;
+      outline: none;
+      cursor: pointer;
+    }
+    .options-row select:focus { border-color: #6c63ff; }
+    .options-row .tip { font-size: .78rem; color: #555; }
+
+    .error-box {
+      margin-top: 14px;
+      padding: 10px 14px;
+      background: #2c1a1a;
+      border: 1px solid #5c2d2d;
+      border-radius: 8px;
+      color: #ff7070;
+      font-size: .87rem;
+      display: none;
+    }
+
+    .summary {
+      margin-top: 24px;
+      font-size: .88rem;
+      color: #888;
+      display: none;
+    }
+    .summary strong { color: #e2e2e8; }
+
+    .bar-wrap {
+      margin-top: 12px;
+      height: 6px;
+      background: #222230;
+      border-radius: 99px;
+      overflow: hidden;
+      display: none;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6c63ff, #a78bfa);
+      border-radius: 99px;
+      transition: width .4s ease;
+      width: 0%;
+    }
+
+    .log {
+      margin-top: 20px;
+      max-height: 340px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .log-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: .85rem;
+      background: #11111a;
+      border: 1px solid #1e1e2e;
+      animation: fadeIn .25s ease;
+    }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; } }
+
+    .log-row .num   { color: #555; min-width: 36px; font-size: .8rem; }
+    .log-row .title { flex: 1; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .badge {
+      font-size: .75rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 99px;
+      white-space: nowrap;
+    }
+    .badge-done     { background: #1a3a1a; color: #5dba6a; border: 1px solid #2a5a2a; }
+    .badge-skipped  { background: #1e1e10; color: #a0a030; border: 1px solid #3a3a10; }
+    .badge-failed   { background: #2c1a1a; color: #d06060; border: 1px solid #5a2a2a; }
+    .badge-working  { background: #1a1a30; color: #7070d0; border: 1px solid #2a2a50; }
+    .badge-retrying { background: #2a1e0a; color: #c89040; border: 1px solid #5a3a0a; }
+
+    .dl-btn {
+      background: none;
+      border: 1px solid #3a3a50;
+      color: #a78bfa;
+      font-size: .75rem;
+      padding: 2px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .15s;
+      text-decoration: none;
+    }
+    .dl-btn:hover { background: #2a2a40; }
+
+    .done-banner {
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 10px;
+      background: #0e2a1a;
+      border: 1px solid #1f5a30;
+      color: #5dba6a;
+      font-size: .9rem;
+      display: none;
+    }
+    .done-banner strong { font-size: 1rem; display: block; margin-bottom: 4px; }
+
+    .cancelled-banner {
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 10px;
+      background: #1e1a0a;
+      border: 1px solid #5a4a0a;
+      color: #c89040;
+      font-size: .9rem;
+      display: none;
+    }
+    .cancelled-banner strong { font-size: 1rem; display: block; margin-bottom: 4px; }
+
+    .section-title {
+      margin-top: 40px;
+      font-size: .8rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #555;
+      max-width: 680px;
+      width: 100%;
+      padding-left: 4px;
+    }
+    .file-list {
+      margin-top: 10px;
+      width: 100%;
+      max-width: 680px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #1a1a24;
+      border: 1px solid #2a2a38;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: .85rem;
+    }
+    .file-row .fname { flex: 1; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row .fsize { color: #555; font-size: .8rem; }
+  </style>
+</head>
+<body>
+
+  <div class="logo">🎙️</div>
+  <h1>YouTube Transcriber</h1>
+  <p class="subtitle">Paste a video or playlist URL — transcripts are saved instantly</p>
+
+  <div class="card">
+    <div class="input-row">
+      <input id="url" type="text" placeholder="https://www.youtube.com/playlist?list=…" autofocus/>
+    </div>
+    <div class="options-row">
+      <label for="browser">Browser cookies:</label>
+      <select id="browser">
+        <option value="">None (default)</option>
+        <option value="chrome">Chrome</option>
+        <option value="firefox">Firefox</option>
+      </select>
+      <span class="tip">— helps with age-restricted videos</span>
+    </div>
+    <div style="margin-top:12px;" class="btn-row">
+      <button id="go" onclick="startJob()">Transcribe</button>
+      <button id="cancelBtn" onclick="cancelJob()">Cancel</button>
+    </div>
+    <div class="error-box" id="err"></div>
+
+    <div class="summary" id="summary"></div>
+    <div class="bar-wrap" id="barWrap"><div class="bar-fill" id="bar"></div></div>
+
+    <div class="log" id="log"></div>
+    <div class="done-banner" id="doneBanner"></div>
+    <div class="cancelled-banner" id="cancelledBanner"></div>
+  </div>
+
+  <div class="section-title" id="prevTitle" style="display:none">Previously saved transcripts</div>
+  <div class="file-list" id="fileList"></div>
+
+<script>
+  let es = null;
+
+  async function startJob() {
+    const url     = document.getElementById('url').value.trim();
+    const browser = document.getElementById('browser').value || null;
+    const err     = document.getElementById('err');
+    err.style.display = 'none';
+
+    if (!url) { showError('Please paste a YouTube URL first.'); return; }
+
+    // reset UI
+    document.getElementById('log').innerHTML         = '';
+    document.getElementById('doneBanner').style.display      = 'none';
+    document.getElementById('cancelledBanner').style.display = 'none';
+    document.getElementById('summary').style.display = 'none';
+    document.getElementById('barWrap').style.display = 'none';
+    document.getElementById('bar').style.width       = '0%';
+    document.getElementById('go').disabled           = true;
+    document.getElementById('cancelBtn').style.display = 'block';
+
+    const res = await fetch('/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, browser})
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      showError(json.error);
+      document.getElementById('go').disabled = false;
+      document.getElementById('cancelBtn').style.display = 'none';
+      return;
+    }
+
+    if (es) es.close();
+    es = new EventSource('/stream');
+
+    es.addEventListener('status',    e => { setStatus(JSON.parse(e.data).msg); });
+    es.addEventListener('total',     e => { onTotal(JSON.parse(e.data)); });
+    es.addEventListener('progress',  e => { onProgress(JSON.parse(e.data)); });
+    es.addEventListener('done',      e => { onDone(JSON.parse(e.data)); });
+    es.addEventListener('cancelled', e => { onCancelled(JSON.parse(e.data)); });
+    es.addEventListener('error',     e => {
+      try { showError(JSON.parse(e.data).msg); } catch { showError('Unknown error.'); }
+      resetButtons();
+      es.close();
+    });
+  }
+
+  async function cancelJob() {
+    document.getElementById('cancelBtn').disabled = true;
+    await fetch('/cancel', {method: 'POST'});
+  }
+
+  function resetButtons() {
+    document.getElementById('go').disabled           = false;
+    document.getElementById('cancelBtn').style.display = 'none';
+    document.getElementById('cancelBtn').disabled    = false;
+  }
+
+  let totalVideos = 0;
+
+  function setStatus(msg) {
+    const sum = document.getElementById('summary');
+    sum.style.display = 'block';
+    sum.innerHTML = msg;
+  }
+
+  function onTotal({total}) {
+    totalVideos = total;
+    setStatus(`Found <strong>${total}</strong> ${total === 1 ? 'video' : 'videos'} — transcribing…`);
+    document.getElementById('barWrap').style.display = 'block';
+  }
+
+  function onProgress({i, total, title, state, source, reason, filename, attempt, wait}) {
+    const pct = Math.round((i / total) * 100);
+    document.getElementById('bar').style.width = pct + '%';
+
+    if (state !== 'retrying') {
+      setStatus(`Processing <strong>${i} / ${total}</strong>`);
+    }
+
+    const existing = document.getElementById(`row-${i}`);
+    if (existing) existing.remove();
+
+    const log = document.getElementById('log');
+    const row = document.createElement('div');
+    row.className = 'log-row';
+    row.id = `row-${i}`;
+
+    let badge = '', extra = '';
+    if (state === 'working') {
+      badge = `<span class="badge badge-working">…</span>`;
+    } else if (state === 'retrying') {
+      badge = `<span class="badge badge-retrying">⏳ retry ${attempt} — waiting ${wait}s</span>`;
+      setStatus(`Rate limited on video ${i}/${total} — waiting ${wait}s before retry…`);
+    } else if (state === 'done') {
+      badge = `<span class="badge badge-done">✓ ${escHtml(source)}</span>`;
+      if (filename) extra = `<a class="dl-btn" href="/download/${encodeURIComponent(filename)}" download>Download</a>`;
+    } else if (state === 'skipped') {
+      badge = `<span class="badge badge-skipped">↩ ${escHtml(reason)}</span>`;
+    } else if (state === 'failed') {
+      badge = `<span class="badge badge-failed">✗ ${escHtml(reason)}</span>`;
+    }
+
+    row.innerHTML = `
+      <span class="num">${i}/${total}</span>
+      <span class="title" title="${escHtml(title)}">${escHtml(title)}</span>
+      ${badge}
+      ${extra}
+    `;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function onDone({success, skipped}) {
+    document.getElementById('bar').style.width = '100%';
+    resetButtons();
+    setStatus(`<strong>Done!</strong> ${success} saved, ${skipped} skipped.`);
+    const banner = document.getElementById('doneBanner');
+    banner.style.display = 'block';
+    banner.innerHTML = `<strong>All finished!</strong> ${success} transcript${success !== 1 ? 's' : ''} saved to your <em>generated_transcript_combined_texts</em> folder.`;
+    if (es) es.close();
+    loadFileList();
+  }
+
+  function onCancelled({success, skipped}) {
+    resetButtons();
+    setStatus(`Cancelled — ${success} saved, ${skipped} skipped.`);
+    const banner = document.getElementById('cancelledBanner');
+    banner.style.display = 'block';
+    banner.innerHTML = `<strong>Cancelled.</strong> ${success} transcript${success !== 1 ? 's' : ''} were saved before stopping.`;
+    if (es) es.close();
+    loadFileList();
+  }
+
+  function showError(msg) {
+    const err = document.getElementById('err');
+    err.textContent = msg;
+    err.style.display = 'block';
+  }
+
+  function escHtml(s) {
+    if (!s) return '';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  async function loadFileList() {
+    const res   = await fetch('/transcripts');
+    const files = await res.json();
+    const list  = document.getElementById('fileList');
+    const title = document.getElementById('prevTitle');
+    list.innerHTML = '';
+    if (!files.length) { title.style.display = 'none'; return; }
+    title.style.display = 'block';
+    files.forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML = `
+        <span class="fname" title="${escHtml(f.name)}">${escHtml(f.name.replace(/_/g, ' '))}</span>
+        <span class="fsize">${f.size_kb} KB</span>
+        <a class="dl-btn" href="/download/${encodeURIComponent(f.name)}" download>Download</a>
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') startJob(); });
+
+  loadFileList();
+</script>
+</body>
+</html>
