@@ -2,10 +2,24 @@
 
 A tool for bulk-downloading transcripts from YouTube videos and playlists. Three separate entry points exist, each with different capabilities and dependency requirements.
 
+## How to Run
+
+```bash
+cd "C:\Users\Ruben\Documents\Claude\YouTube-playlist-transcriber"
+python app.py
+```
+
+Opens browser automatically at `http://127.0.0.1:5000`. Flask caches templates with `debug=False`, so **restart the server after every change to `app.py` or `templates/index.html`**.
+
+To kill the server between sessions, find the PID and stop it:
+```powershell
+$pids = (netstat -ano | findstr ":5000 " | Select-String "LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique)
+foreach ($p in $pids) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+```
+
 ## Entry Points
 
 ### `app.py` — Flask Web App (primary)
-- Run: `python app.py` → opens browser at `http://127.0.0.1:5000`
 - Uses `yt-dlp` to fetch YouTube's built-in VTT captions (no audio download, very fast)
 - Handles single videos and playlists
 - Browser cookies option (Chrome/Firefox) for age-restricted videos
@@ -60,7 +74,32 @@ Install for `app.py` and `transcribe.py`:
 pip install -r requirements.txt  # flask, pandas, yt-dlp
 ```
 
-`app.py` looks for `yt-dlp.exe` in the project root first, then falls back to system `yt-dlp`.
+**yt-dlp resolution order** (in `app.py`):
+1. `yt-dlp.exe` in the project root
+2. `yt-dlp` on the system PATH (via `shutil.which`)
+3. `Scripts/yt-dlp.exe` next to the current Python executable (where pip installs it)
+
+pip on this machine installs scripts to `C:\Users\Ruben\AppData\Local\Python\pythoncore-3.14-64\Scripts\` which is **not** on PATH — the fallback in step 3 handles this.
+
+## Known Limitations
+
+- **Age-restricted videos**: require browser cookies. Select Chrome or Firefox in the dropdown before starting. Chrome 127+ uses App-Bound Encryption that yt-dlp can't decrypt — selecting Chrome behaves the same as None. Firefox works if the profile is accessible and Firefox is not locking the cookie DB.
+- **Browser cookie failures**: any cookie-read error (locked DB, profile not found, DPAPI) silently falls back to no-cookies so non-restricted videos still work.
+
+## Architecture Notes (`app.py`)
+
+- `job_running` flag + `job_lock` (`threading.Lock`) — check/set atomically to prevent two simultaneous jobs
+- `progress_queue` (`queue.Queue`) — background thread pushes events; `/stream` SSE endpoint drains it
+- `cancel_event` (`threading.Event`) — set by `/cancel`; checked between videos in the job loop
+- SSE stream closes itself when idle with no job running (within 15s); hard cap at ~1 hour
+- `/download/<filename>` — validates against `[\w\-]+` regex + `commonpath` containment check to prevent path traversal
+
+## UI (`templates/index.html`)
+
+Single-page app. Key behaviours:
+- **Clear button** (next to status line) — appears after a job finishes; wipes the log, progress bar, and banners from the dashboard without deleting any files
+- **Previously saved transcripts** section — shown on fresh page load only; does **not** reappear after a job completes (the job log already has download buttons). Has its own Clear button that hides the list and persists the hidden state in `localStorage`.
+- EventSource error handling: named `error` events from the server show a message and reset buttons; transport-level failures reset buttons only if `readyState === CLOSED`
 
 ## Standalone Tools
 
