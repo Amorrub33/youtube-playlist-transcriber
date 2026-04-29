@@ -220,6 +220,28 @@
       max-width: 680px;
       width: 100%;
       padding-left: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .clear-btn {
+      font-size: .72rem;
+      font-weight: 600;
+      letter-spacing: 0;
+      text-transform: none;
+      color: #555;
+      background: none;
+      border: 1px solid #2a2a38;
+      border-radius: 6px;
+      padding: 2px 10px;
+      cursor: pointer;
+      transition: color .15s, border-color .15s;
+    }
+    .clear-btn:hover { color: #e2e2e8; border-color: #555; }
+    .summary-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
     .file-list {
       margin-top: 10px;
@@ -268,7 +290,10 @@
     </div>
     <div class="error-box" id="err"></div>
 
-    <div class="summary" id="summary"></div>
+    <div class="summary-row">
+      <div class="summary" id="summary" style="flex:1"></div>
+      <button class="clear-btn" id="clearLogBtn" onclick="clearLog()" style="display:none">Clear</button>
+    </div>
     <div class="bar-wrap" id="barWrap"><div class="bar-fill" id="bar"></div></div>
 
     <div class="log" id="log"></div>
@@ -276,7 +301,10 @@
     <div class="cancelled-banner" id="cancelledBanner"></div>
   </div>
 
-  <div class="section-title" id="prevTitle" style="display:none">Previously saved transcripts</div>
+  <div class="section-title" id="prevTitle" style="display:none">
+    <span>Previously saved transcripts</span>
+    <button class="clear-btn" onclick="clearFileList()">Clear</button>
+  </div>
   <div class="file-list" id="fileList"></div>
 
 <script>
@@ -297,23 +325,30 @@
     document.getElementById('summary').style.display = 'none';
     document.getElementById('barWrap').style.display = 'none';
     document.getElementById('bar').style.width       = '0%';
-    document.getElementById('go').disabled           = true;
-    document.getElementById('cancelBtn').style.display = 'block';
+    document.getElementById('go').disabled                  = true;
+    document.getElementById('cancelBtn').style.display      = 'block';
+    document.getElementById('clearLogBtn').style.display    = 'none';
 
-    const res = await fetch('/start', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url, browser})
-    });
-    const json = await res.json();
+    let res, body;
+    try {
+      res = await fetch('/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url, browser})
+      });
+      body = await res.json().catch(() => ({}));
+    } catch (e) {
+      showError('Could not reach the server. Is it still running?');
+      resetButtons();
+      return;
+    }
     if (!res.ok) {
-      showError(json.error);
-      document.getElementById('go').disabled = false;
-      document.getElementById('cancelBtn').style.display = 'none';
+      showError(body.error || 'Failed to start job.');
+      resetButtons();
       return;
     }
 
-    if (es) es.close();
+    if (es) { es.close(); es = null; }
     es = new EventSource('/stream');
 
     es.addEventListener('status',    e => { setStatus(JSON.parse(e.data).msg); });
@@ -321,16 +356,41 @@
     es.addEventListener('progress',  e => { onProgress(JSON.parse(e.data)); });
     es.addEventListener('done',      e => { onDone(JSON.parse(e.data)); });
     es.addEventListener('cancelled', e => { onCancelled(JSON.parse(e.data)); });
-    es.addEventListener('error',     e => {
-      try { showError(JSON.parse(e.data).msg); } catch { showError('Unknown error.'); }
-      resetButtons();
-      es.close();
+    es.addEventListener('closed',    () => { closeStream(); });
+    es.addEventListener('error', e => {
+      // Two cases share this event:
+      //  1. Server-emitted "error" event with JSON data → show its message.
+      //  2. Native EventSource transport failure (no data) → only fatal if
+      //     the connection is fully closed; otherwise the browser will retry.
+      if (e && e.data) {
+        let msg = 'Unknown error.';
+        try { msg = JSON.parse(e.data).msg || msg; } catch {}
+        showError(msg);
+        resetButtons();
+        closeStream();
+        return;
+      }
+      if (es && es.readyState === EventSource.CLOSED) {
+        showError('Connection to server lost.');
+        resetButtons();
+        closeStream();
+      }
     });
   }
 
+  function closeStream() {
+    if (es) { es.close(); es = null; }
+  }
+
   async function cancelJob() {
-    document.getElementById('cancelBtn').disabled = true;
-    await fetch('/cancel', {method: 'POST'});
+    const btn = document.getElementById('cancelBtn');
+    btn.disabled = true;
+    try {
+      await fetch('/cancel', {method: 'POST'});
+    } catch {
+      showError('Could not reach the server to cancel.');
+      btn.disabled = false;
+    }
   }
 
   function resetButtons() {
@@ -339,8 +399,6 @@
     document.getElementById('cancelBtn').disabled    = false;
   }
 
-  let totalVideos = 0;
-
   function setStatus(msg) {
     const sum = document.getElementById('summary');
     sum.style.display = 'block';
@@ -348,7 +406,6 @@
   }
 
   function onTotal({total}) {
-    totalVideos = total;
     setStatus(`Found <strong>${total}</strong> ${total === 1 ? 'video' : 'videos'} — transcribing…`);
     document.getElementById('barWrap').style.display = 'block';
   }
@@ -401,8 +458,8 @@
     const banner = document.getElementById('doneBanner');
     banner.style.display = 'block';
     banner.innerHTML = `<strong>All finished!</strong> ${success} transcript${success !== 1 ? 's' : ''} saved to your <em>generated_transcript_combined_texts</em> folder.`;
-    if (es) es.close();
-    loadFileList();
+    closeStream();
+    document.getElementById('clearLogBtn').style.display = 'block';
   }
 
   function onCancelled({success, skipped}) {
@@ -411,8 +468,17 @@
     const banner = document.getElementById('cancelledBanner');
     banner.style.display = 'block';
     banner.innerHTML = `<strong>Cancelled.</strong> ${success} transcript${success !== 1 ? 's' : ''} were saved before stopping.`;
-    if (es) es.close();
-    loadFileList();
+    closeStream();
+    document.getElementById('clearLogBtn').style.display = 'block';
+  }
+
+  function clearLog() {
+    document.getElementById('log').innerHTML            = '';
+    document.getElementById('summary').style.display   = 'none';
+    document.getElementById('barWrap').style.display   = 'none';
+    document.getElementById('doneBanner').style.display      = 'none';
+    document.getElementById('cancelledBanner').style.display = 'none';
+    document.getElementById('clearLogBtn').style.display     = 'none';
   }
 
   function showError(msg) {
@@ -426,14 +492,28 @@
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  async function loadFileList() {
-    const res   = await fetch('/transcripts');
-    const files = await res.json();
+  function clearFileList() {
+    document.getElementById('fileList').innerHTML = '';
+    document.getElementById('prevTitle').style.display = 'none';
+    localStorage.setItem('transcriptListCleared', '1');
+  }
+
+  async function loadFileList(forceShow = false) {
+    if (!forceShow && localStorage.getItem('transcriptListCleared') === '1') return;
+    let files = [];
+    try {
+      const res = await fetch('/transcripts');
+      if (!res.ok) return;
+      files = await res.json();
+    } catch {
+      return;
+    }
     const list  = document.getElementById('fileList');
     const title = document.getElementById('prevTitle');
     list.innerHTML = '';
-    if (!files.length) { title.style.display = 'none'; return; }
-    title.style.display = 'block';
+    if (!Array.isArray(files) || !files.length) { title.style.display = 'none'; return; }
+    localStorage.removeItem('transcriptListCleared');
+    title.style.display = 'flex';
     files.forEach(f => {
       const row = document.createElement('div');
       row.className = 'file-row';

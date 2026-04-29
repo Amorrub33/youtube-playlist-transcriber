@@ -10,6 +10,7 @@ import queue
 import glob as glob_module
 import tempfile
 import webbrowser
+import shutil
 from flask import Flask, render_template, request, Response, jsonify, send_file
 import pandas as pd
 
@@ -19,15 +20,22 @@ BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, 'generated_transcript_combined_texts')
 METADATA_DIR    = os.path.join(BASE_DIR, 'generated_transcript_metadata_tables')
 
-# Use local yt-dlp.exe if present, otherwise fall back to system yt-dlp
+# Resolve yt-dlp: local exe > on PATH > same Python's Scripts dir
 _local_ytdlp = os.path.join(BASE_DIR, 'yt-dlp.exe')
-YTDLP = _local_ytdlp if os.path.exists(_local_ytdlp) else 'yt-dlp'
+if os.path.exists(_local_ytdlp):
+    YTDLP = _local_ytdlp
+else:
+    YTDLP = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
+    if not YTDLP:
+        _scripts = os.path.join(os.path.dirname(sys.executable), 'Scripts', 'yt-dlp.exe')
+        YTDLP = _scripts if os.path.exists(_scripts) else 'yt-dlp'
 
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 os.makedirs(METADATA_DIR,    exist_ok=True)
 
 progress_queue = queue.Queue()
 job_running    = False
+job_lock       = threading.Lock()
 cancel_event   = threading.Event()
 
 MAX_RETRIES  = 3
@@ -120,11 +128,10 @@ def get_transcript(video_url, browser=None):
         '--no-playlist',
     ]
 
-    # Build list of attempts: with cookies first (if requested), then without
     attempts = []
     if browser:
         attempts.append(base_cmd + ['--cookies-from-browser', browser])
-    attempts.append(base_cmd)  # always fall back to no cookies
+    attempts.append(base_cmd)
 
     for cmd_base in attempts:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -137,8 +144,15 @@ def get_transcript(video_url, browser=None):
             stderr       = result.stderr
             stderr_lower = stderr.lower()
 
-            # If cookies failed due to DPAPI/decryption, skip to no-cookies attempt
-            if 'dpapi' in stderr_lower or 'failed to decrypt' in stderr_lower:
+            # If this was a cookies attempt and the browser cookie read failed for
+            # any reason (DPAPI, locked DB, profile not found, etc.), fall back to
+            # the no-cookies attempt rather than failing every video.
+            is_cookies_attempt = '--cookies-from-browser' in cmd
+            cookie_read_failed = any(kw in stderr_lower for kw in (
+                'dpapi', 'failed to decrypt', 'unable to read', 'could not find',
+                'database is locked', 'no cookies', 'keyring', 'cookies from browser',
+            ))
+            if is_cookies_attempt and cookie_read_failed:
                 continue
 
             vtt_files = glob_module.glob(os.path.join(tmp_dir, '*.vtt'))
@@ -150,6 +164,8 @@ def get_transcript(video_url, browser=None):
                     return None, 'private video'
                 if 'unavailable' in stderr_lower or 'removed' in stderr_lower:
                     return None, 'video unavailable'
+                if 'sign in' in stderr_lower or 'confirm your age' in stderr_lower or 'age-restricted' in stderr_lower:
+                    return None, 'age-restricted — re-run with a browser selected in the cookies dropdown'
                 short_err = (stderr or 'no output').strip().splitlines()[-1][:120]
                 return None, f'no captions — {short_err}'
 
@@ -185,14 +201,15 @@ def emit(event, data):
 
 def run_job(url, browser):
     global job_running
-    job_running = True
-    cancel_event.clear()
     consecutive_rate_limits = 0
 
     try:
         emit('status', {'msg': 'Fetching video list…'})
         entries = fetch_playlist_entries(url)
         total   = len(entries)
+        if total == 0:
+            emit('error', {'msg': 'No videos found at that URL.'})
+            return
         emit('total', {'total': total})
 
         success, skipped = 0, 0
@@ -256,7 +273,8 @@ def run_job(url, browser):
     except Exception as e:
         emit('error', {'msg': str(e)})
     finally:
-        job_running = False
+        with job_lock:
+            job_running = False
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -269,20 +287,34 @@ def index():
 @app.route('/start', methods=['POST'])
 def start():
     global job_running
-    if job_running:
-        return jsonify({'error': 'A job is already running.'}), 400
 
-    body    = request.json or {}
-    url     = body.get('url', '').strip()
-    browser = body.get('browser') or None   # 'chrome', 'firefox', or None
+    body    = request.get_json(silent=True) or {}
+    url     = (body.get('url') or '').strip()
+    browser = body.get('browser') or None
 
     if not url or ('youtube.com' not in url and 'youtu.be' not in url):
         return jsonify({'error': 'Please enter a valid YouTube URL.'}), 400
 
-    while not progress_queue.empty():
-        progress_queue.get_nowait()
+    with job_lock:
+        if job_running:
+            return jsonify({'error': 'A job is already running.'}), 400
+        job_running = True
 
-    threading.Thread(target=run_job, args=(url, browser), daemon=True).start()
+    # Drain any stale events from a previous run
+    while not progress_queue.empty():
+        try:
+            progress_queue.get_nowait()
+        except queue.Empty:
+            break
+    cancel_event.clear()
+
+    try:
+        threading.Thread(target=run_job, args=(url, browser), daemon=True).start()
+    except Exception as e:
+        with job_lock:
+            job_running = False
+        return jsonify({'error': f'Failed to start job: {e}'}), 500
+
     return jsonify({'ok': True})
 
 
@@ -295,13 +327,25 @@ def cancel():
 @app.route('/stream')
 def stream():
     def generate():
+        idle_pings = 0
         while True:
             try:
-                item = progress_queue.get(timeout=30)
+                item = progress_queue.get(timeout=15)
+                idle_pings = 0
                 yield f"event: {item['event']}\ndata: {json.dumps(item['data'])}\n\n"
                 if item['event'] in ('done', 'error', 'cancelled'):
                     break
             except queue.Empty:
+                # If no job is running and the queue stays empty, close the
+                # stream rather than pinging forever.
+                if not job_running:
+                    yield "event: closed\ndata: {}\n\n"
+                    break
+                idle_pings += 1
+                # Hard cap as a final safety net (~1 hour of idle pings).
+                if idle_pings > 240:
+                    yield "event: error\ndata: {\"msg\": \"Stream idle timeout.\"}\n\n"
+                    break
                 yield "event: ping\ndata: {}\n\n"
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -309,20 +353,34 @@ def stream():
 
 @app.route('/download/<filename>')
 def download(filename):
-    path = os.path.join(TRANSCRIPTS_DIR, filename + '.txt')
-    if os.path.exists(path):
-        return send_file(path, as_attachment=True)
-    return 'File not found', 404
+    # Prevent path traversal: reject anything that isn't a plain basename.
+    if not filename or filename != os.path.basename(filename):
+        return 'Invalid filename', 400
+    if not re.fullmatch(r'[\w\-]+', filename):
+        return 'Invalid filename', 400
+
+    path = os.path.normpath(os.path.join(TRANSCRIPTS_DIR, filename + '.txt'))
+    if os.path.commonpath([os.path.abspath(path), TRANSCRIPTS_DIR]) != TRANSCRIPTS_DIR:
+        return 'Invalid filename', 400
+    if not os.path.exists(path):
+        return 'File not found', 404
+    return send_file(path, as_attachment=True)
 
 
 @app.route('/transcripts')
 def list_transcripts():
     files = []
+    if not os.path.isdir(TRANSCRIPTS_DIR):
+        return jsonify(files)
     for f in sorted(os.listdir(TRANSCRIPTS_DIR)):
-        if f.endswith('.txt'):
-            name = f[:-4]
+        if not f.endswith('.txt'):
+            continue
+        name = f[:-4]
+        try:
             size = os.path.getsize(os.path.join(TRANSCRIPTS_DIR, f))
-            files.append({'name': name, 'size_kb': round(size / 1024, 1)})
+        except OSError:
+            continue
+        files.append({'name': name, 'size_kb': round(size / 1024, 1)})
     return jsonify(files)
 
 
