@@ -11,7 +11,7 @@ python app.py
 
 Opens browser automatically at `http://127.0.0.1:5000`. Flask caches templates with `debug=False`, so **restart the server after every change to `app.py` or `templates/index.html`**.
 
-To kill the server between sessions, find the PID and stop it:
+To kill the server between sessions:
 ```powershell
 $pids = (netstat -ano | findstr ":5000 " | Select-String "LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique)
 foreach ($p in $pids) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
@@ -29,6 +29,8 @@ foreach ($p in $pids) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
 - Skips videos whose `.txt` output already exists
 - Cancel button stops the background thread mid-job
 - `/transcripts` lists saved files; `/download/<filename>` serves them
+- `/config` GET/POST — reads and writes `config.json` (output folder setting)
+- `/browse` — opens a native Windows folder picker (tkinter) and returns the chosen path
 
 ### `transcribe.py` — CLI Script
 - Run: `python transcribe.py` → prompts for URL
@@ -46,12 +48,14 @@ foreach ($p in $pids) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
 
 ## Output
 
-All three scripts write to the same two directories (created automatically):
+Output location is configurable via the UI. The chosen folder is stored in `config.json` in the project root. Inside the chosen folder, two subdirectories are created automatically:
 
 | Directory | Contents |
 |---|---|
 | `generated_transcript_combined_texts/` | `<filename>.txt` — header + plain combined transcript text |
 | `generated_transcript_metadata_tables/` | `<filename>.csv` and `<filename>.json` — per-segment timing data |
+
+Default (if no folder is configured): project root directory.
 
 **Text file format:**
 ```
@@ -92,13 +96,17 @@ pip on this machine installs scripts to `C:\Users\Ruben\AppData\Local\Python\pyt
 - `progress_queue` (`queue.Queue`) — background thread pushes events; `/stream` SSE endpoint drains it
 - `cancel_event` (`threading.Event`) — set by `/cancel`; checked between videos in the job loop
 - SSE stream closes itself when idle with no job running (within 15s); hard cap at ~1 hour
-- `/download/<filename>` — validates against `[\w\-]+` regex + `commonpath` containment check to prevent path traversal
+- `get_dirs()` — reads `config.json`, resolves output folder via `os.path.abspath()`, creates subdirs, returns `(transcripts_dir, metadata_dir)`. Called once per job at start; also called by `/download` and `/transcripts`.
+- `/download/<filename>` — validates against `[\w\-]+` regex + `commonpath` containment check (both sides `abspath`'d) to prevent path traversal. Path normalization ensures forward-slash paths from tkinter don't break the check on Windows.
+- `config.json` — persists `output_dir`. Paths are stored normalized via `os.path.normpath()`.
 
 ## UI (`templates/index.html`)
 
 Single-page app. Key behaviours:
+- **Save to** row — folder path input + Browse button. Browse opens a native Windows folder picker. Typing a path and tabbing away saves it. Setting persists in `config.json` across restarts.
 - **Clear button** (next to status line) — appears after a job finishes; wipes the log, progress bar, and banners from the dashboard without deleting any files
 - **Previously saved transcripts** section — shown on fresh page load only; does **not** reappear after a job completes (the job log already has download buttons). Has its own Clear button that hides the list and persists the hidden state in `localStorage`.
+- **Done banner** — shows the actual save path (`out_dir` from the SSE `done` event), not a hardcoded folder name.
 - EventSource error handling: named `error` events from the server show a message and reset buttons; transport-level failures reset buttons only if `readyState === CLOSED`
 
 ## Standalone Tools

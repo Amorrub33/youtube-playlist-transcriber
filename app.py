@@ -16,9 +16,8 @@ import pandas as pd
 
 app = Flask(__name__)
 
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-TRANSCRIPTS_DIR = os.path.join(BASE_DIR, 'generated_transcript_combined_texts')
-METADATA_DIR    = os.path.join(BASE_DIR, 'generated_transcript_metadata_tables')
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 
 # Resolve yt-dlp: local exe > on PATH > same Python's Scripts dir
 _local_ytdlp = os.path.join(BASE_DIR, 'yt-dlp.exe')
@@ -30,17 +29,40 @@ else:
         _scripts = os.path.join(os.path.dirname(sys.executable), 'Scripts', 'yt-dlp.exe')
         YTDLP = _scripts if os.path.exists(_scripts) else 'yt-dlp'
 
-os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
-os.makedirs(METADATA_DIR,    exist_ok=True)
-
 progress_queue = queue.Queue()
 job_running    = False
 job_lock       = threading.Lock()
 cancel_event   = threading.Event()
 
 MAX_RETRIES  = 3
-RETRY_DELAYS = [15, 30, 60]   # seconds to wait between each retry attempt
-VIDEO_DELAY  = (2.0, 5.0)     # random sleep range between videos
+RETRY_DELAYS = [15, 30, 60]
+VIDEO_DELAY  = (2.0, 5.0)
+
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(data):
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def get_dirs():
+    """Return (transcripts_dir, metadata_dir), creating them if needed."""
+    cfg  = load_config()
+    base = os.path.abspath(cfg.get('output_dir') or BASE_DIR)
+    transcripts = os.path.join(base, 'generated_transcript_combined_texts')
+    metadata    = os.path.join(base, 'generated_transcript_metadata_tables')
+    os.makedirs(transcripts, exist_ok=True)
+    os.makedirs(metadata,    exist_ok=True)
+    return transcripts, metadata
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -67,7 +89,6 @@ def fetch_playlist_entries(url):
 
 
 def parse_vtt(vtt_path):
-    """Parse a WebVTT file into a list of {text, start, duration} dicts."""
     with open(vtt_path, 'r', encoding='utf-8') as f:
         content = f.read()
     data = []
@@ -113,11 +134,6 @@ def parse_vtt(vtt_path):
 
 
 def get_transcript(video_url, browser=None):
-    """
-    Fetch subtitles via yt-dlp (downloads YouTube's own captions as VTT).
-    Returns (data, source) on success or (None, reason_str) on failure.
-    browser: None | 'chrome' | 'firefox'
-    """
     base_cmd = [
         YTDLP,
         '--write-auto-subs',
@@ -177,19 +193,19 @@ def get_transcript(video_url, browser=None):
     return None, 'no captions available'
 
 
-def save_transcript(data, filename, title, video_url, source):
+def save_transcript(data, filename, title, video_url, source, transcripts_dir, metadata_dir):
     combined = ' '.join(e['text'] for e in data)
     combined = re.sub(r'\s+', ' ', combined).strip()
 
-    txt_path = os.path.join(TRANSCRIPTS_DIR, f'{filename}.txt')
+    txt_path = os.path.join(transcripts_dir, f'{filename}.txt')
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"Title: {title}\nURL: {video_url}\nSource: {source}\n")
         f.write('=' * 60 + '\n\n')
         f.write(combined)
 
     df = pd.DataFrame(data)
-    df.to_csv(os.path.join(METADATA_DIR, f'{filename}.csv'), index=False)
-    df.to_json(os.path.join(METADATA_DIR, f'{filename}.json'), orient='records', indent=4)
+    df.to_csv(os.path.join(metadata_dir, f'{filename}.csv'), index=False)
+    df.to_json(os.path.join(metadata_dir, f'{filename}.json'), orient='records', indent=4)
     return txt_path
 
 
@@ -204,6 +220,8 @@ def run_job(url, browser):
     consecutive_rate_limits = 0
 
     try:
+        transcripts_dir, metadata_dir = get_dirs()
+
         emit('status', {'msg': 'Fetching video list…'})
         entries = fetch_playlist_entries(url)
         total   = len(entries)
@@ -220,7 +238,7 @@ def run_job(url, browser):
                 return
 
             filename = clean_filename(title) or video_id
-            txt_path = os.path.join(TRANSCRIPTS_DIR, f'{filename}.txt')
+            txt_path = os.path.join(transcripts_dir, f'{filename}.txt')
 
             emit('progress', {'i': i, 'total': total, 'title': title, 'state': 'working'})
 
@@ -250,14 +268,15 @@ def run_job(url, browser):
                                       'wait': wait})
                     time.sleep(wait)
                 else:
-                    break   # permanent error, don't retry
+                    break
 
             if cancel_event.is_set():
                 emit('cancelled', {'success': success, 'skipped': skipped})
                 return
 
             if data:
-                save_transcript(data, filename, title, yt_url, source)
+                save_transcript(data, filename, title, yt_url, source,
+                                transcripts_dir, metadata_dir)
                 emit('progress', {'i': i, 'total': total, 'title': title,
                                   'state': 'done', 'source': source, 'filename': filename})
                 success += 1
@@ -268,7 +287,7 @@ def run_job(url, browser):
 
             time.sleep(random.uniform(*VIDEO_DELAY))
 
-        emit('done', {'success': success, 'skipped': skipped, 'out_dir': TRANSCRIPTS_DIR})
+        emit('done', {'success': success, 'skipped': skipped, 'out_dir': transcripts_dir})
 
     except Exception as e:
         emit('error', {'msg': str(e)})
@@ -282,6 +301,44 @@ def run_job(url, browser):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/config', methods=['GET'])
+def get_config():
+    cfg = load_config()
+    return jsonify({'output_dir': cfg.get('output_dir', '')})
+
+
+@app.route('/config', methods=['POST'])
+def set_config():
+    body       = request.get_json(silent=True) or {}
+    output_dir = (body.get('output_dir') or '').strip()
+    if output_dir:
+        output_dir = os.path.normpath(output_dir)
+    if output_dir and not os.path.isdir(output_dir):
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            return jsonify({'error': f'Could not create folder: {e}'}), 400
+    cfg = load_config()
+    cfg['output_dir'] = output_dir
+    save_config(cfg)
+    return jsonify({'ok': True})
+
+
+@app.route('/browse', methods=['GET'])
+def browse():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', True)
+        folder = filedialog.askdirectory(title='Select output folder for transcripts')
+        root.destroy()
+        return jsonify({'path': folder or None})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/start', methods=['POST'])
@@ -359,8 +416,10 @@ def download(filename):
     if not re.fullmatch(r'[\w\-]+', filename):
         return 'Invalid filename', 400
 
-    path = os.path.normpath(os.path.join(TRANSCRIPTS_DIR, filename + '.txt'))
-    if os.path.commonpath([os.path.abspath(path), TRANSCRIPTS_DIR]) != TRANSCRIPTS_DIR:
+    transcripts_dir, _ = get_dirs()
+    abs_transcripts = os.path.abspath(transcripts_dir)
+    path = os.path.normpath(os.path.join(abs_transcripts, filename + '.txt'))
+    if os.path.commonpath([os.path.abspath(path), abs_transcripts]) != abs_transcripts:
         return 'Invalid filename', 400
     if not os.path.exists(path):
         return 'File not found', 404
@@ -369,15 +428,16 @@ def download(filename):
 
 @app.route('/transcripts')
 def list_transcripts():
+    transcripts_dir, _ = get_dirs()
     files = []
-    if not os.path.isdir(TRANSCRIPTS_DIR):
+    if not os.path.isdir(transcripts_dir):
         return jsonify(files)
-    for f in sorted(os.listdir(TRANSCRIPTS_DIR)):
+    for f in sorted(os.listdir(transcripts_dir)):
         if not f.endswith('.txt'):
             continue
         name = f[:-4]
         try:
-            size = os.path.getsize(os.path.join(TRANSCRIPTS_DIR, f))
+            size = os.path.getsize(os.path.join(transcripts_dir, f))
         except OSError:
             continue
         files.append({'name': name, 'size_kb': round(size / 1024, 1)})
